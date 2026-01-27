@@ -1,241 +1,210 @@
+from decimal import Decimal, InvalidOperation
+
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 
 from bot.states.add_transaction import AddTransactionState
 from bot.keyboards.main_menu import main_menu_kb
+from bot.keyboards.categories import categories_keyboard  # ❗ важно
 
-from infrastructure.models import TransactionType
+from bot.ui.screen_renderer import ScreenRenderer
+from bot.ui.components import Header, Card, Text, StatRow, Divider
+
 from infrastructure.repositories.user_repo import UserRepository
 from infrastructure.repositories.category_repo import CategoryRepository
 from infrastructure.repositories.transaction_repo import TransactionRepository
 
+from core.services.antifraud_service import AntiFraudService
 from core.services.gamification_service import GamificationService
 from core.services.achievement_service import AchievementService
-from core.services.antifraud_service import AntiFraudService
-
-# UI COMPONENTS
-from bot.ui.screen_renderer import ScreenRenderer
-from bot.ui.components.header import Header
-from bot.ui.components.card import Card
-from bot.ui.components.section import Section
-from bot.ui.components.badge import Badge
-from bot.ui.components.divider import Divider
-from bot.ui.components.layout import VStack
 
 router = Router()
 
-renderer = ScreenRenderer()
-user_repo = UserRepository()
-cat_repo = CategoryRepository()
-tx_repo = TransactionRepository()
-
-gamification = GamificationService()
-achievement_service = AchievementService()
-antifraud = AntiFraudService()
-
-
-# ============================================================
-#             ШАГ 1 — старт (выбор расхода/дохода)
-# ============================================================
+# ───────────────────────────────
+# ENTRY
+# ───────────────────────────────
 
 @router.message(F.text == "➕ Добавить расход")
-async def add_expense(message: Message, state: FSMContext):
+async def add_expense(message: Message, state: FSMContext, renderer: ScreenRenderer):
     await state.clear()
-    await state.update_data(tx_type="expense")
     await state.set_state(AddTransactionState.waiting_for_amount)
+    await state.update_data(tx_type="expense")
 
     await renderer.render(
-        message,
-        screen_id="enter_amount",
-        header=Header("🧾 Добавляем расход"),
-        body=Card(
-            "Введи сумму, например: 1500 или 1500.50\n"
-            "Чтобы отменить — напиши <b>отмена</b>."
-        ),
+        message=message,
+        header=Header("➕ Добавление расхода"),
+        body=Card([
+            Text("Введи сумму, например: 1500 или 1500.50"),
+            Text("Чтобы отменить — напиши <b>отмена</b>."),
+        ]),
     )
 
 
 @router.message(F.text == "💰 Добавить доход")
-async def add_income(message: Message, state: FSMContext):
+async def add_income(message: Message, state: FSMContext, renderer: ScreenRenderer):
     await state.clear()
-    await state.update_data(tx_type="income")
     await state.set_state(AddTransactionState.waiting_for_amount)
+    await state.update_data(tx_type="income")
 
     await renderer.render(
-        message,
-        screen_id="enter_amount",
-        header=Header("💰 Добавляем доход"),
-        body=Card(
-            "Введи сумму, например: 20000\n"
-            "Чтобы отменить — напиши <b>отмена</b>."
-        ),
+        message=message,
+        header=Header("💰 Добавление дохода"),
+        body=Card([
+            Text("Введи сумму, например: 1500 или 1500.50"),
+            Text("Чтобы отменить — напиши <b>отмена</b>."),
+        ]),
     )
 
 
-# ============================================================
-#             ШАГ 2 — ввод суммы (A3.3 UI)
-# ============================================================
+# ───────────────────────────────
+# AMOUNT
+# ───────────────────────────────
 
 @router.message(AddTransactionState.waiting_for_amount)
-async def amount_entered(message: Message, state: FSMContext):
-    text = message.text.lower().strip()
+async def amount_entered(
+    message: Message,
+    state: FSMContext,
+    renderer: ScreenRenderer,
+    cat_repo: CategoryRepository,
+):
+    text = message.text.strip().lower()
 
-    # Отмена
-    if text in ("отмена", "cancel", "❌"):
+    if text in {"отмена", "cancel", "❌"}:
         await state.clear()
-        await message.answer("Окей, отменил 🙂", reply_markup=main_menu_kb())
+        await message.answer("Ок, отменили 👌", reply_markup=main_menu_kb())
         return
 
-    # Валидация суммы
     try:
-        amount = float(text.replace(",", "."))
+        amount = Decimal(message.text.replace(",", "."))
         if amount <= 0:
-            raise ValueError
-    except ValueError:
-        # UI-ошибка
-        await renderer.render(
-            message,
-            screen_id="amount_invalid",
-            header=Header("⚠️ Некорректная сумма"),
-            body=Card(
-                "Сумма должна быть числом больше 0.\n"
-                "Попробуй снова 🙂"
-            ),
-        )
+            raise InvalidOperation
+    except (InvalidOperation, ValueError):
+        await message.answer("❌ Введи корректную сумму")
         return
 
     await state.update_data(amount=amount)
-
-    user = await user_repo.get_by_telegram_id(message.from_user.id)
-
-    # Загружаем категории под конкретный тип
-    data = await state.get_data()
-    tx_type = data["tx_type"]
-
-    categories = await cat_repo.get_all(user.id)
-    categories = [c for c in categories if c.type == tx_type]
-
-    if not categories:
-        await message.answer("Нет категорий для этого типа 😕", reply_markup=main_menu_kb())
-        await state.clear()
-        return
-
     await state.set_state(AddTransactionState.waiting_for_category)
 
-    # 👇 UI — экран выбора категории
-    rows = []
-    for c in categories:
-        rows.append(
-            Badge(c.name, callback_data=f"cat:{c.id}")
-        )
+    categories = await cat_repo.get_all(message.from_user.id)
 
-    body = VStack(
-       Section("Выбери категорию:"),
-        *rows,
-        Divider(),
-        Badge("❌ Отменить", callback_data="cancel_tx")
-    )
-
-    return await renderer.render(
-        message,
-        screen_id="choose_category",
-        header=Header("📂 Выбор категории"),
-        body=Card(body),
+    await renderer.render(
+        message=message,
+        header=Header("📂 Категория"),
+        body=Card([Text("Выбери категорию:")]),
+        reply_markup=categories_keyboard(categories),
     )
 
 
-# ============================================================
-#             ШАГ 3 — выбор категории (A3.2 UI)
-# ============================================================
+# ───────────────────────────────
+# CATEGORY
+# ───────────────────────────────
 
-@router.callback_query(AddTransactionState.waiting_for_category, F.data == "cancel_tx")
-async def cancel_from_categories(callback: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await callback.answer()
-    await callback.message.answer("Окей, отменил 🙂", reply_markup=main_menu_kb())
+@router.callback_query(AddTransactionState.waiting_for_category)
+async def category_selected(
+    call: CallbackQuery,
+    state: FSMContext,
+    cat_repo: CategoryRepository,
+    renderer: ScreenRenderer,
+):
+    await call.answer()
 
-
-@router.callback_query(AddTransactionState.waiting_for_category, F.data.startswith("cat:"))
-async def category_chosen(callback: CallbackQuery, state: FSMContext):
-    cat_id = int(callback.data.split(":")[1])
-
-    user = await user_repo.get_by_telegram_id(callback.from_user.id)
-    category = await cat_repo.get_by_id(cat_id, user.id)
-
-    if category is None:
-        await callback.answer("Категория не найдена", show_alert=True)
+    category = await cat_repo.get_by_id(call.data)
+    if not category:
+        await call.message.answer("❌ Категория не найдена")
         return
 
-    await state.update_data(category_id=cat_id, category_name=category.name)
+    await state.update_data(
+        category_id=category.id,
+        category_name=category.name,
+    )
     await state.set_state(AddTransactionState.waiting_for_comment)
 
-    await callback.answer()
-
-    # Переход к вводу комментария
-    await callback.message.answer(
-        "Если хочешь, добавь комментарий.\n"
-        "Или напиши <b>-</b>, чтобы пропустить.\n"
-        "Для отмены — <b>отмена</b>."
+    await renderer.render(
+        message=call.message,
+        header=Header("✏️ Комментарий"),
+        body=Card([
+            Text("Добавь комментарий (необязательно)."),
+            Text("Если не нужен — напиши <b>-</b>."),
+        ]),
     )
 
 
-# ============================================================
-#             ШАГ 4 — комментарий → сохранение
-# ============================================================
+# ───────────────────────────────
+# COMMENT
+# ───────────────────────────────
 
 @router.message(AddTransactionState.waiting_for_comment)
-async def comment_entered(message: Message, state: FSMContext):
-    text = message.text.strip().lower()
+async def comment_entered(message: Message, state: FSMContext, renderer: ScreenRenderer):
+    text = message.text.strip()
 
-    # отмена
-    if text in ("отмена", "cancel", "❌"):
+    if text.lower() in {"отмена", "cancel", "❌"}:
         await state.clear()
-        await message.answer("Окей, ничего не добавил 🙂", reply_markup=main_menu_kb())
+        await message.answer("Ок, отменили 👌", reply_markup=main_menu_kb())
         return
 
-    comment = None if text == "-" else message.text
+    data = await state.get_data()
+    comment = None if text == "-" else text
+
+    await state.update_data(comment=comment)
+    await state.set_state(AddTransactionState.waiting_for_confirm)
+
+    await renderer.render(
+        message=message,
+        header=Header("✅ Подтверждение"),
+        body=Card([
+            StatRow("Тип", "Расход" if data["tx_type"] == "expense" else "Доход"),
+            StatRow("Категория", data["category_name"]),
+            StatRow("Сумма", f"{data['amount']:.2f}"),
+            StatRow("Комментарий", comment or "—"),
+            Divider(),
+            Text("Подтвердить операцию?"),
+        ]),
+    )
+
+
+# ───────────────────────────────
+# CONFIRM/CANCEL
+# ───────────────────────────────
+
+@router.message(AddTransactionState.waiting_for_confirm)
+async def confirm_transaction(
+    message: Message,
+    state: FSMContext,
+    user_repo: UserRepository,
+    tx_repo: TransactionRepository,
+    antifraud: AntiFraudService,
+    gamification: GamificationService,
+    achievement_service: AchievementService,
+):
+    text = message.text.strip().lower()
+
+    if text in {"отмена", "cancel", "❌"}:
+        await state.clear()
+        await message.answer("Операция отменена 👌", reply_markup=main_menu_kb())
+        return
+
+    if text not in {"да", "yes", "ok"}:
+        await message.answer("Напиши <b>да</b> или <b>отмена</b>.")
+        return
 
     data = await state.get_data()
     user = await user_repo.get_by_telegram_id(message.from_user.id)
 
-    tx_type = TransactionType(data["tx_type"])
-    amount = data["amount"]
-    category_id = data["category_id"]
-    category_name = data["category_name"]
+    if not antifraud.allow_transaction(user, data["amount"]):
+        await message.answer("🚨 Подозрительная операция")
+        return
 
-    # сохраняем транзакцию
-    await tx_repo.add_transaction(
+    await tx_repo.create(
         user_id=user.id,
-        type_=tx_type,
-        amount=amount,
-        category_id=category_id,
-        comment=comment,
+        amount=data["amount"],
+        category_id=data["category_id"],
+        tx_type=data["tx_type"],
+        comment=data["comment"],
     )
+
+    gamification.apply_transaction(user, data["amount"], data["tx_type"])
+    achievement_service.check(user)
 
     await state.clear()
-
-    # антифрод
-    fraud_ok = await antifraud.validate_transaction(user, amount)
-
-    if not fraud_ok:
-        await message.answer(
-            "⚠️ <b>Подозрительная активность</b>\n"
-            "XP не начислено."
-        )
-        return await message.answer("Продолжим? 👇", reply_markup=main_menu_kb())
-
-    # начисление XP
-    level, streak, xp = await gamification.process_transaction(user)
-
-    await message.answer(
-        f"💵 <b>Запись добавлена!</b>\n\n"
-        f"Сумма: <b>{amount}</b>\n"
-        f"Категория: <b>{category_name}</b>\n"
-        f"Комментарий: <i>{comment or '—'}</i>\n\n"
-        f"✨ +{GamificationService.XP_PER_TRANSACTION} XP\n"
-        f"🔥 Streak: {streak} дней\n"
-        f"🏅 Уровень: {level}\n"
-        f"📊 XP: {xp}",
-        reply_markup=main_menu_kb()
-    )
+    await message.answer("✅ Операция сохранена!", reply_markup=main_menu_kb())

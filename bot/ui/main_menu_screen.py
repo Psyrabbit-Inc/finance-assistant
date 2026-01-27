@@ -1,27 +1,22 @@
-from bot.ui.screen_renderer import ScreenRenderer
+from bot.ui.components import Header, Card, StatRow, Badge, Text
 from bot.keyboards.main_menu import main_menu_kb
+from bot.ui.screen_renderer import ScreenRenderer
 
-from bot.ui.components import Header, Card, StatRow, Badge
 
+async def render_main_screen(message, user, renderer: ScreenRenderer):
+    header = Header("🏠 Личный кабинет")
 
-async def render_main_screen(message, user):
-    renderer = ScreenRenderer()
-
-    profile_card = Card([
+    body = Card([
         Badge("👤", user.nickname or "Пользователь"),
         StatRow("🏆", "Уровень", user.level),
         StatRow("⭐", "XP", user.xp),
         StatRow("🔥", "Стрик", f"{user.streak_days} дней"),
+        Text("Выбери действие ниже 👇"),
     ])
-
-    text = (
-        Header("Личный кабинет").render() +
-        profile_card.render() +
-        "Выбери действие ниже 👇"
-    )
 
     return await renderer.render(
         message=message,
-        text=text,
+        header=header,
+        body=body,
         reply_markup=main_menu_kb()
     )

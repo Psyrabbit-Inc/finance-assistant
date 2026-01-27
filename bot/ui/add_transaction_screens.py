@@ -16,28 +16,26 @@ def confirm_kb():
 
 
 async def render_confirm_screen(message, user, category, amount, comment, op_type):
-    """
-    Экран подтверждения операции.
-    """
     icon = "➖" if op_type == "expense" else "➕"
     op_title = "Расход" if op_type == "expense" else "Доход"
 
-    header = Header(f"{icon} Подтверждение операции").render()
+    header = Header(f"{icon} Подтверждение операции")
 
-    card = Card([
+    body = Card([
         StatRow("Тип", op_title),
         StatRow("Категория", category.name),
         StatRow("Сумма", f"{amount:,.2f} ₸"),
         StatRow("Комментарий", comment if comment else "—"),
-    ]).render()
-
-    bottom_note = Section(
-        "Проверь данные перед сохранением.\n"
-        "Если хочешь изменить — нажми *Отмена*."
-    ).render()
+        Divider(),
+        Section(
+            "Проверь данные перед сохранением.\n"
+            "Если хочешь изменить — нажми «Отмена»."
+        ),
+    ])
 
     return await renderer.render(
         message=message,
-        text=header + card + Divider().render() + bottom_note,
+        header=header,
+        body=body,
         reply_markup=confirm_kb()
     )
